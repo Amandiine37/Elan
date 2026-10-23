@@ -7,7 +7,7 @@
  * « ?v= » des scripts dans index.html. C'est la modification de ce fichier
  * qui declenche le bandeau « Une nouvelle version est prete ».
  */
-var VERSION = "1.0";
+var VERSION = "1.1";
 var CACHE = "elan-v" + VERSION;
 var ASSETS = [
   "./",

@@ -361,3 +361,25 @@ var PHRASES = [
   "Respire, souris, et c'est parti.",
   "Tu es plus fort·e que tu ne le crois."
 ];
+
+/* Contre-indications (dispense, douleur, fragilité).
+   exos     : exercices à éviter quand cette zone est cochée
+   sansSaut : la zone exclut aussi tous les exercices avec sauts
+   flag     : les exercices marqués de ce drapeau dans EXERCICES sont exclus aussi */
+var ZONES_SENSIBLES = {
+  chevilles: { e: "🦶", nom: "Chevilles / pieds", sansSaut: true,
+    exos: ["Mollets sur marche", "Fente arrière alternée", "Fente latérale", "Fentes avec haltères", "Montée sur marche", "Patineur", "Sauts à la corde", "Jacks sans saut", "Burpees"] },
+  genoux: { e: "🦵", nom: "Genoux", sansSaut: true, flag: "gen", exos: [] },
+  hanches: { e: "🦴", nom: "Hanches", exos: ["Pigeon", "Fente latérale", "Squat sumo", "Papillon", "Fente basse avec ouverture", "Patineur", "Marche latérale élastique"] },
+  dos: { e: "🧍", nom: "Dos", flag: "dos", exos: [] },
+  nuque: { e: "🙇", nom: "Nuque / cervicales", exos: ["Crunch", "Hollow (bateau creux)", "Rotations russes", "Relevés de jambes", "Superman"] },
+  epaules: { e: "🤷", nom: "Épaules", exos: ["Développé épaules", "Pompes en pike (épaules)", "Pompes pieds surélevés", "Dips sur chaise", "Élévations latérales", "Tractions", "Tractions négatives", "Suspension active", "Thruster", "Développé couché à la barre", "Développé couché au sol", "Extension triceps"] },
+  poignets: { e: "✋", nom: "Poignets / mains", exos: ["Pompes sur les genoux", "Pompes", "Pompes pieds surélevés", "Pompes contre le mur", "Dips sur chaise", "Pompes en pike (épaules)", "Planche avec touches d'épaules", "Mountain climbers", "Burpees", "Bird dog", "Chat-vache", "Chien tête en bas", "Rotation thoracique à quatre pattes", "Fente basse avec ouverture"] }
+};
+
+/* Exercices bonus déconseillés selon la zone sensible. */
+BONUS["x-etoile"].eviter = ["poignets"];
+BONUS["x-soleil"].eviter = ["poignets"];
+BONUS["x-echelle"].eviter = ["chevilles", "genoux", "poignets"];
+BONUS["x-pistol"].eviter = ["chevilles", "genoux"];
+BONUS["x-corde"].eviter = ["chevilles", "genoux"];

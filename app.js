@@ -6,7 +6,7 @@
 (function(){
   "use strict";
 
-  var VERSION = "1.0";
+  var VERSION = "1.1";
   var K = "elan_donnees_v1";
   var K_SAUVEGARDE = "elan_sauvegarde_v1";
   var K_VUE = "elan_vue_v1";
@@ -61,9 +61,10 @@
   function indexJour(isoD){ return (depuisIso(isoD).getDay() + 6) % 7; }
 
   /* ---------------- Données ---------------- */
+  function dispenseVide(){ return { zones: [], sansSaut: false, exos: [], jusquau: "", note: "" }; }
   function donneesVides(){
     return {
-      reglages: { prenom: "", objectifDefaut: 2, mode: "auto", theme: "energie", rappelJours: 14, debut: semaineCourante() },
+      reglages: { prenom: "", objectifDefaut: 2, mode: "auto", theme: "energie", rappelJours: 14, debut: semaineCourante(), dispense: dispenseVide() },
       semaineType: [],      // séances prévues qui se répètent chaque semaine
       semaines: {},         // planning propre à une semaine : { "2026-10-19": [séances] }
       faits: [],            // séances réalisées
@@ -80,6 +81,7 @@
     if(!d || typeof d !== "object") return base;
     Object.keys(base).forEach(function(k){ if(d[k] !== undefined) base[k] = d[k]; });
     base.reglages = Object.assign(donneesVides().reglages, d.reglages || {});
+    base.reglages.dispense = Object.assign(dispenseVide(), base.reglages.dispense || {});
     return base;
   }
   var D = normaliser(lire(K, null));
@@ -109,6 +111,43 @@
   function act(k){ return ACTIVITES[k] || ACTIVITES.autre; }
   function titreDe(s){ return s.titre || act(s.activite).nom; }
   function progDe(id){ return D.programmes.find(function(p){ return p.id === id; }); }
+
+  /* ---------------- Dispense / contre-indications ----------------
+     La dispense (zones à ménager, pas de saut, exercices exclus) est
+     enregistrée dans les réglages. Elle filtre le générateur et les idées
+     de programmes, et signale ⚠️ les exercices à éviter partout ailleurs. */
+  var EXO_PAR_NOM = {};
+  EXERCICES.forEach(function(e){ EXO_PAR_NOM[e.n] = e; });
+  ECHAUFFEMENT.forEach(function(x){ EXO_PAR_NOM[x.n] = { n: x.n, t: x.t, imp: x.imp, echauf: 1 }; });
+  function dispense(){ return D.reglages.dispense; }
+  function dispenseActive(){ var d = dispense(); return d.zones.length > 0 || d.sansSaut || d.exos.length > 0; }
+  function raisonEviter(nom, zones, sansSaut, interdits){
+    if(interdits && interdits.indexOf(nom) >= 0) return "exclu par toi";
+    var e = EXO_PAR_NOM[nom];
+    for(var i = 0; i < zones.length; i++){
+      var Z = ZONES_SENSIBLES[zones[i]];
+      if(!Z) continue;
+      if(Z.exos.indexOf(nom) >= 0 || (e && Z.sansSaut && e.imp) || (e && Z.flag && e[Z.flag])) return Z.nom.toLowerCase();
+    }
+    if(sansSaut && e && e.imp) return "pas de saut";
+    return null;
+  }
+  function raisonDispense(nom){ var d = dispense(); return raisonEviter(nom, d.zones, d.sansSaut, d.exos); }
+  function libDispense(){
+    var d = dispense(), l = d.zones.map(function(z){ return ZONES_SENSIBLES[z].nom.toLowerCase(); });
+    if(d.sansSaut) l.push("pas de saut");
+    if(d.exos.length) l.push(pluriel(d.exos.length, "exercice exclu", "exercices exclus"));
+    return l.join(", ");
+  }
+  function conflits(p){
+    var n = 0;
+    (p.seances || []).forEach(function(s){ (s.exos || []).forEach(function(x){ if(raisonDispense(x.nom)) n++; }); });
+    return n;
+  }
+  function seanceEnConflit(slot){
+    var p = slot.prog ? progDe(slot.prog) : null, se = p && p.seances[slot.seance];
+    return !!(se && se.exos.some(function(x){ return raisonDispense(x.nom); }));
+  }
 
   /* État d'une semaine : complete, joker, encours (semaine actuelle pas
      encore complète), neutre (1re semaine d'utilisation pas complète :
@@ -371,6 +410,15 @@
     var futur = wk > cur;
 
     var h = navSemaine(wk, "sem-nav", D.reglages.debut, decalerSemaine(cur, 8));
+    var dsp = dispense();
+    if(dispenseActive() && dsp.jusquau && dsp.jusquau < auj){
+      h += '<div class="bandeau">🩹 Ta dispense (' + esc(libDispense()) + ') devait se terminer le ' + dateCourte(dsp.jusquau) + ' : c\'est bon ?'
+        + '<div class="actions"><button type="button" class="btn principal" data-a="retirer-dispense">Oui, la retirer</button>'
+        + '<button type="button" class="btn" data-a="ouvrir-dispense">La modifier</button></div></div>';
+    } else if(dispenseActive() && wk === cur){
+      h += '<p class="petit muted" style="margin:-.3rem 0 .6rem">🩹 Dispense en cours : ' + esc(libDispense()) + (dsp.jusquau ? " (jusqu'au " + dateCourte(dsp.jusquau) + ")" : "")
+        + ' · <a href="#" data-a="ouvrir-dispense">modifier</a></p>';
+    }
 
     var texte;
     if(etat === "complete") texte = "<b>Semaine complète ! 🎉</b><br><span class='muted petit'>Chaque séance en plus est un bonus.</span>";
@@ -414,7 +462,7 @@
           + '<button type="button" class="coche' + (f ? " fait" : "") + '" data-a="cocher" data-id="' + s.id + '" ' + (futur ? "disabled" : "") + ' aria-label="' + (f ? "Décocher" : "Cocher") + ' la séance">' + SVG_COCHE + '</button>'
           + '<span class="emo">' + act(s.activite).e + '</span>'
           + '<div class="corps" data-a="detail-creneau" data-id="' + s.id + '"><div class="t">' + esc(titreDe(s)) + '</div>'
-          + '<div class="s">' + (s.duree ? s.duree + " min" : "") + (p ? " · " + esc(p.nom) : "")
+          + '<div class="s">' + (s.duree ? s.duree + " min" : "") + (p ? " · " + esc(p.nom) : "") + (seanceEnConflit(s) ? " · ⚠️ à adapter" : "")
           + (f && f.ressenti ? ' · <span class="ressenti">' + RESSENTIS[f.ressenti].split(" ")[0] + '</span>' : "")
           + (f && f.date !== date ? " · faite le " + dateCourte(f.date) : "") + '</div></div></div>';
       });
@@ -647,7 +695,7 @@
       { nom: "Souplesse & détente", g: { objectif: "zen", niveau: 1, activites: ["yoga"], zones: ["total"], lieu: "maison", materiel: ["tapis"], contraintes: [], seances: 2, duree: 20, semaines: 4, jours: [2, 6], echauffement: true } }
     ];
     MODELES = defs.map(function(d, i){
-      var p = genererProgramme(d.g, 1000 + i * 7);
+      var p = genererProgramme(avecDispense(cloner(d.g)), 1000 + i * 7);
       p.id = "modele-" + i; p.nom = d.nom; p.origine = "modele";
       return p;
     });
@@ -663,14 +711,17 @@
 
   function afficherProgrammes(){
     var h = '<button type="button" class="gros-btn" data-a="generateur"><span class="e">✨</span><span><b>Créer mon programme personnalisé</b><small>Objectif, niveau, matériel, durée… on s\'occupe du reste.</small></span></button>'
-      + '<button type="button" class="btn doux plein" data-a="nouveau-programme">✍️ Noter un programme à la main</button>';
+      + '<button type="button" class="btn doux plein" data-a="nouveau-programme">✍️ Noter un programme à la main</button>'
+      + (dispenseActive()
+        ? '<div class="bandeau" style="margin-top:.6rem">🩹 <b>Dispense :</b> ' + esc(libDispense()) + '. Les programmes générés en tiennent compte. <a href="#" data-a="ouvrir-dispense">Modifier</a></div>'
+        : '<button type="button" class="btn doux plein" style="margin-top:.5rem" data-a="ouvrir-dispense">🩹 Une douleur, une dispense ? Indique-la</button>');
     h += '<div class="titre-section">Mes programmes</div>';
     if(!D.programmes.length){
       h += '<div class="card vide"><div class="e">📋</div>Aucun programme pour l\'instant.<br>Génère-en un, note celui de ton coach, ou pars d\'une idée ci-dessous.</div>';
     } else {
       D.programmes.forEach(function(p){
         h += '<div class="card prog" data-a="ouvrir-programme" data-id="' + p.id + '"><span class="e">' + esc(p.emoji || "📋") + '</span>'
-          + '<div class="c"><b>' + esc(p.nom) + infoSemaineProg(p) + '</b><small>' + esc(resumeProg(p)) + '</small></div><span class="muted">›</span></div>';
+          + '<div class="c"><b>' + esc(p.nom) + infoSemaineProg(p) + (conflits(p) ? ' <span title="À adapter à ta dispense">⚠️</span>' : "") + '</b><small>' + esc(resumeProg(p)) + '</small></div><span class="muted">›</span></div>';
       });
     }
     h += '<div class="titre-section">Idées pour démarrer</div>';
@@ -697,7 +748,9 @@
     var h = "", sec = null;
     exos.forEach(function(x){
       if((x.sec || "") !== sec){ sec = x.sec || ""; if(sec) h += '<div class="bloc-titre">' + esc(sec) + '</div>'; }
-      h += '<div class="exo"><div class="l1"><b>' + esc(x.nom) + '</b>' + (x.dose ? '<span class="dose">' + esc(x.dose) + '</span>' : "") + '</div>'
+      var r = raisonDispense(x.nom);
+      h += '<div class="exo' + (r ? " a-eviter" : "") + '"><div class="l1"><b>' + esc(x.nom) + '</b>' + (x.dose ? '<span class="dose">' + esc(x.dose) + '</span>' : "") + '</div>'
+        + (r ? '<div class="avert">⚠️ À éviter avec ta dispense (' + esc(r) + ')</div>' : "")
         + ((x.cons || x.repos) ? '<div class="cons">' + esc(x.cons || "") + (x.repos ? (x.cons ? " · " : "") + "Récup " + esc(x.repos) : "") + '</div>' : "") + '</div>';
     });
     return h;
@@ -728,7 +781,12 @@
   }
 
   function ouvrirProgramme(p, estModele){
-    var h = htmlProgramme(p) + '<div style="height:.8rem"></div>';
+    var nc = conflits(p), h = "";
+    if(nc){
+      h += '<div class="bandeau alerte">🩹 ' + pluriel(nc, "exercice ne convient pas", "exercices ne conviennent pas") + ' à ta dispense (' + esc(libDispense()) + ').'
+        + (estModele ? "" : '<div class="actions"><button type="button" class="btn principal" data-a="adapter-programme" data-id="' + p.id + '">🔄 Les remplacer par des exercices adaptés</button></div>') + '</div>';
+    }
+    h += htmlProgramme(p) + '<div style="height:.8rem"></div>';
     if(estModele){
       h += '<button type="button" class="btn principal plein" data-a="garder-modele" data-id="' + p.id + '">➕ Ajouter à mes programmes</button>';
     } else {
@@ -855,10 +913,19 @@
   var G = null, etapeG = 1, apercuG = null;
   function choixParDefaut(){
     return { objectif: "forme", niveau: 1, but: "", activites: ["renfo"], zones: ["total"], lieu: "maison", materiel: [],
-      contraintes: [], seances: 3, duree: 30, semaines: 8, jours: [], echauffement: true };
+      contraintes: [], interdits: [], seances: 3, duree: 30, semaines: 8, jours: [], echauffement: true };
+  }
+  /* Ajoute la dispense en cours aux choix du générateur (ou d'une idée). */
+  function avecDispense(g){
+    var d = dispense();
+    g.contraintes = (g.contraintes || []).slice();
+    d.zones.forEach(function(z){ if(g.contraintes.indexOf(z) < 0) g.contraintes.push(z); });
+    if(d.sansSaut && g.contraintes.indexOf("saut") < 0) g.contraintes.push("saut");
+    g.interdits = d.exos.slice();
+    return g;
   }
   function ouvrirGenerateur(params){
-    G = Object.assign(choixParDefaut(), cloner(params || D.gen || {}));
+    G = avecDispense(Object.assign(choixParDefaut(), cloner(params || D.gen || {})));
     etapeG = 1; apercuG = null;
     rendreGenerateur();
   }
@@ -867,7 +934,8 @@
   var Q_ZONES = { total: "Tout le corps", jambes: "Jambes & fessiers", haut: "Haut du corps", abdos: "Abdos / gainage", dos: "Dos & posture" };
   var Q_LIEUX = { maison: "🏠 À la maison", exterieur: "🌳 Dehors", salle: "🏟️ En salle de sport" };
   var Q_MATERIEL = { tapis: "Tapis", halteres: "Haltères", elastique: "Élastiques", kettlebell: "Kettlebell", corde: "Corde à sauter", traction: "Barre de traction", banc: "Banc", velo: "Vélo / home trainer" };
-  var Q_CONTRAINTES = { saut: "🤫 Sans saut (voisins, appartement)", genoux: "🦵 Genoux fragiles", dos: "🧍 Dos sensible" };
+  var Q_CONTRAINTES = { saut: "🤫 Sans saut (voisins, appartement)" };
+  Object.keys(ZONES_SENSIBLES).forEach(function(z){ Q_CONTRAINTES[z] = ZONES_SENSIBLES[z].e + " " + ZONES_SENSIBLES[z].nom + " à ménager"; });
 
   function chips(cle, options, multi){
     var val = G[cle];
@@ -891,7 +959,9 @@
     } else if(etapeG === 3){
       h += '<div class="q">Où t\'entraînes-tu surtout ?</div>' + chips("lieu", Q_LIEUX)
         + '<div class="q">Ton matériel <small>(rien coché = poids du corps)</small></div>' + chips("materiel", Q_MATERIEL, true)
-        + '<div class="q">Des précautions à prendre ?</div>' + chips("contraintes", Object.assign({ __liste: 1 }, Q_CONTRAINTES), true);
+        + '<div class="q">Des précautions à prendre ?</div>'
+        + (dispenseActive() ? '<p class="petit muted" style="margin-top:0">🩹 Ta dispense est déjà cochée' + (G.interdits.length ? ", et tes " + pluriel(G.interdits.length, "exercice exclu", "exercices exclus") + " seront évités" : "") + '.</p>' : "")
+        + chips("contraintes", Object.assign({ __liste: 1 }, Q_CONTRAINTES), true);
     } else if(etapeG === 4){
       h += '<div class="q">Combien de séances par semaine ?</div>' + chips("seances", { 2: "2", 3: "3", 4: "4", 5: "5", 6: "6" })
         + '<div class="q">Durée d\'une séance</div>' + chips("duree", { 15: "15 min", 20: "20 min", 30: "30 min", 45: "45 min", 60: "1 h" })
@@ -950,10 +1020,12 @@
     if(g.lieu === "salle") ["salle", "halteres", "kettlebell", "banc", "traction", "elastique", "velo", "corde"].forEach(function(m){ mat[m] = 1; });
     var contraintes = (g.contraintes || []).slice();
     if(g.objectif === "dos" && contraintes.indexOf("dos") < 0) contraintes.push("dos");
-    var sansSaut = contraintes.indexOf("saut") >= 0 || contraintes.indexOf("genoux") >= 0;
-    var genoux = contraintes.indexOf("genoux") >= 0, dosSensible = contraintes.indexOf("dos") >= 0;
+    var zonesC = contraintes.filter(function(c){ return ZONES_SENSIBLES[c]; });
+    var sansSaut = contraintes.indexOf("saut") >= 0 || zonesC.some(function(z){ return ZONES_SENSIBLES[z].sansSaut; });
+    var appuisFragiles = zonesC.indexOf("genoux") >= 0 || zonesC.indexOf("chevilles") >= 0;
+    var interdits = g.interdits || [];
     var pool = EXERCICES.filter(function(e){
-      return e.m.some(function(m){ return mat[m]; }) && e.nv <= nv && !(sansSaut && e.imp) && !(genoux && e.gen) && !(dosSensible && e.dos);
+      return e.m.some(function(m){ return mat[m]; }) && e.nv <= nv && !(sansSaut && e.imp) && !raisonEviter(e.n, zonesC, sansSaut, interdits);
     });
     var usage = {};
     var chargePreferee = g.objectif === "muscle" || (g.materiel || []).length > 0 || g.lieu === "salle";
@@ -1056,7 +1128,7 @@
 
     function supportsCardio(){
       var s = [];
-      if(g.lieu === "exterieur") s.push(genoux && nv === 1 ? "marche" : "course");
+      if(g.lieu === "exterieur") s.push(appuisFragiles ? "marche" : "course");
       if(mat.velo) s.push("velo");
       if(mat.salle) s.push("rameur");
       if(mat.corde && !sansSaut) s.push("corde");
@@ -1202,7 +1274,8 @@
     return {
       id: uid(), nom: O.court + " · " + W + " sem.", emoji: O.e, objectif: O.nom, but: g.but || "",
       niveau: nv, semaines: W, parSemaine: n, duree: D0, materiel: materiel, jours: (g.jours || []).slice().sort(),
-      notes: "", progression: progression, seances: seances, genere: true, params: g, graine: graine, origine: "generateur"
+      notes: O.type === "course" && appuisFragiles ? "⚠️ La course sollicite beaucoup les genoux et les chevilles : avec ta dispense, demande l'avis de ton médecin avant de commencer." : "",
+      progression: progression, seances: seances, genere: true, params: g, graine: graine, origine: "generateur"
     };
   }
 
@@ -1284,6 +1357,7 @@
     } else {
       var b = BONUS[r.id];
       h = '<p class="muted" style="margin-top:-.4rem">' + b.e + " Environ " + b.duree + " min</p>"
+        + (zonesBonus(b).length ? '<div class="bandeau alerte">⚠️ Déconseillé avec ta dispense (' + esc(zonesBonus(b).join(", ")) + ').</div>' : "")
         + '<p>' + esc(b.intro) + '</p><div class="card"><ol class="simple">' + b.etapes.map(function(i){ return "<li>" + esc(i) + "</li>"; }).join("") + '</ol></div>'
         + '<div class="bandeau">💡 ' + esc(b.astuce) + '</div>'
         + '<button type="button" class="btn principal plein" data-a="bonus-aujourdhui" data-id="' + r.id + '">📅 Prévoir aujourd\'hui</button>';
@@ -1292,10 +1366,93 @@
     toutAfficher();
   }
 
+  function zonesBonus(b){
+    return (b.eviter || []).filter(function(z){ return dispense().zones.indexOf(z) >= 0; }).map(function(z){ return ZONES_SENSIBLES[z].nom.toLowerCase(); });
+  }
+
   function choisirTheme(cle){
     if(!themeDebloque(cle)) return;
     D.reglages.theme = cle; sauver(); appliquerTheme(); toutAfficher();
     toast("Thème « " + esc(THEMES[cle].nom) + " » appliqué " + THEMES[cle].e);
+  }
+
+  /* ---------------- Écran « Ma dispense » ---------------- */
+  var CATEGORIES = { force: "Renforcement", gainage: "Gainage / abdos", cardio: "Cardio", mobilite: "Souplesse / étirements" };
+  function ouvrirDispense(){
+    var d = dispense();
+    var h = '<p class="petit muted" style="margin-top:-.4rem">Une dispense, une douleur, une blessure en cours ? Indique ce que tu ne peux pas faire : '
+      + 'les programmes générés l\'évitent, et les exercices concernés sont signalés ⚠️ partout dans l\'appli.</p>'
+      + '<div class="q">Zones à ménager</div><div class="choix" data-groupe="dz">' + Object.keys(ZONES_SENSIBLES).map(function(z){
+        return '<button type="button" data-a="basculer" data-v="' + z + '" class="' + (d.zones.indexOf(z) >= 0 ? "on" : "") + '">' + ZONES_SENSIBLES[z].e + " " + esc(ZONES_SENSIBLES[z].nom) + '</button>';
+      }).join("") + '</div>'
+      + '<div class="choix" data-groupe="ds"><button type="button" data-a="basculer" data-v="1" class="' + (d.sansSaut ? "on" : "") + '">🤫 Pas de saut du tout</button></div>'
+      + '<div class="q">Exercices précis que je ne peux pas faire <small>(en plus de ceux des zones cochées)</small></div>';
+    Object.keys(CATEGORIES).forEach(function(c){
+      h += '<div class="petit muted" style="margin:.2rem 0 .3rem">' + CATEGORIES[c] + '</div><div class="choix" data-groupe="dx">'
+        + EXERCICES.filter(function(e){ return e.c === c; }).map(function(e){
+          return '<button type="button" data-a="basculer" data-v="' + esc(e.n) + '" class="' + (d.exos.indexOf(e.n) >= 0 ? "on" : "") + '">' + esc(e.n) + '</button>';
+        }).join("") + '</div>';
+    });
+    h += '<label class="champ"><span>Jusqu\'au <span class="muted">(facultatif : l\'appli te demandera ensuite si c\'est fini)</span></span><input type="date" id="dp-fin" value="' + esc(d.jusquau) + '"></label>'
+      + '<label class="champ"><span>Note <span class="muted">(facultatif)</span></span><textarea id="dp-note" placeholder="Ex. : entorse cheville droite, kiné le mardi">' + esc(d.note) + '</textarea></label>'
+      + '<button type="button" class="btn principal plein" data-a="enreg-dispense">Enregistrer</button>'
+      + (dispenseActive() ? '<button type="button" class="btn danger plein" style="margin-top:.5rem" data-a="retirer-dispense">Retirer ma dispense</button>' : "")
+      + '<div class="note-sante">Ces réglages aident à éviter les mouvements gênants, ils ne remplacent pas l\'avis de ton médecin ou de ton kiné.</div>';
+    ouvrirFeuille("🩹 Ma dispense", h);
+  }
+
+  function apresChangementDispense(message){
+    sauver(); preparerModeles(); fermerFeuille(); toutAfficher();
+    var concernes = D.programmes.filter(function(p){ return conflits(p) > 0; });
+    if(concernes.length){
+      toast(message + " · " + pluriel(concernes.length, "programme à adapter", "programmes à adapter"), [{ lib: "Adapter", fn: function(){
+        var bilan = { remplaces: 0, restants: 0 };
+        concernes.forEach(function(p){ var b = adapterProgramme(p); bilan.remplaces += b.remplaces; bilan.restants += b.restants; });
+        sauver(); toutAfficher();
+        toast(pluriel(bilan.remplaces, "exercice remplacé", "exercices remplacés") + (bilan.restants ? " · " + bilan.restants + " à revoir à la main" : " ✅"));
+      } }], 8000);
+    } else toast(message);
+  }
+
+  /* Remplace chaque exercice déconseillé par le plus proche qui convient :
+     même catégorie, mêmes zones si possible, matériel disponible, pas déjà
+     dans la séance. Les exercices inconnus (notés à la main) restent signalés. */
+  function adapterProgramme(p){
+    var mat = { aucun: 1 }, g = p.params || {};
+    (g.materiel || []).forEach(function(m){ mat[m] = 1; });
+    if(g.lieu === "salle") ["salle", "halteres", "kettlebell", "banc", "traction", "elastique", "velo", "corde"].forEach(function(m){ mat[m] = 1; });
+    var remplaces = 0;
+    (p.seances || []).forEach(function(s){
+      var dans = {};
+      s.exos.forEach(function(x){ dans[x.nom] = 1; });
+      s.exos.forEach(function(x){
+        var ancien = EXO_PAR_NOM[x.nom];
+        if(!ancien || !raisonDispense(x.nom)) return;
+        var choix = null;
+        if(ancien.echauf){
+          choix = ECHAUFFEMENT.filter(function(c){ return !dans[c.n] && !raisonDispense(c.n); })[0];
+        } else {
+          if(!p.params) ancien.m.forEach(function(m){ mat[m] = 1; });
+          choix = EXERCICES.filter(function(c){
+            return c.c === ancien.c && !dans[c.n] && !raisonDispense(c.n) && c.nv <= Math.max(ancien.nv, p.niveau || 1) && c.m.some(function(m){ return mat[m]; });
+          }).map(function(c){
+            return { e: c, s: c.z.filter(function(z){ return ancien.z.indexOf(z) >= 0; }).length * 2 + ((!!c.iso) === (!!ancien.iso) ? 1.5 : 0) + (c.nv === ancien.nv ? .5 : 0) };
+          }).sort(function(a, b){ return b.s - a.s; }).map(function(o){ return o.e; })[0];
+        }
+        if(!choix) return;
+        var dose = (x.dose || "").replace(/ par côté$/, "").replace(/ \(alterne\)$/, "");
+        if(!ancien.echauf){
+          var series = dose.match(/^(\d+) ×/);
+          if(series && (!!choix.iso) !== (!!ancien.iso)) dose = series[1] + " × " + (choix.iso ? "30 s" : "10 à 12");
+          if(choix.uni) dose += / ×/.test(dose) ? " par côté" : " (alterne)";
+        }
+        delete dans[x.nom];
+        dans[choix.n] = 1;
+        x.nom = choix.n; x.cons = choix.t; x.dose = dose;
+        remplaces++;
+      });
+    });
+    return { remplaces: remplaces, restants: conflits(p) };
   }
 
   /* ---------------- Réglages et sauvegarde ---------------- */
@@ -1316,6 +1473,7 @@
         return '<option value="' + o[0] + '"' + (Number(r.rappelJours) === o[0] ? " selected" : "") + '>' + o[1] + '</option>';
       }).join("") + '</select></label>'
       + '<button type="button" class="btn principal plein" data-a="enreg-reglages">Enregistrer les réglages</button>'
+      + '<button type="button" class="btn doux plein" style="margin-top:.5rem" data-a="ouvrir-dispense">🩹 Ma dispense / contre-indications' + (dispenseActive() ? " (" + esc(libDispense()) + ")" : "") + '</button>'
       + '<div class="titre-section">Sauvegarde</div>'
       + '<div class="card"><p class="petit" style="margin-top:0">Tes données restent <b>uniquement sur ce téléphone</b>. Si tu changes de téléphone ou vides le navigateur, elles sont perdues : '
       + 'fais une sauvegarde de temps en temps (un fichier que tu peux garder dans tes fichiers ou t\'envoyer par mail).</p>'
@@ -1555,6 +1713,27 @@
         sauver(); appliquerTheme(); fermerFeuille(); toutAfficher(); toast("Réglages enregistrés ✅");
         break;
       case "exporter": exporter(); break;
+      case "ouvrir-dispense": ouvrirDispense(); break;
+      case "enreg-dispense":
+        D.reglages.dispense = {
+          zones: $$('[data-groupe="dz"] .on', el).map(function(b){ return b.dataset.v; }),
+          sansSaut: !!$('[data-groupe="ds"] .on', el),
+          exos: $$('[data-groupe="dx"] .on', el).map(function(b){ return b.dataset.v; }),
+          jusquau: $("#dp-fin", el).value, note: $("#dp-note", el).value.trim()
+        };
+        apresChangementDispense(dispenseActive() ? "🩹 Dispense enregistrée" : "Dispense retirée");
+        break;
+      case "retirer-dispense":
+        D.reglages.dispense = dispenseVide();
+        apresChangementDispense("Dispense retirée 💪");
+        break;
+      case "adapter-programme":
+        var pa = progDe(id);
+        if(!pa) break;
+        var bil = adapterProgramme(pa);
+        sauver(); toutAfficher(); ouvrirProgramme(pa, false);
+        toast(pluriel(bil.remplaces, "exercice remplacé", "exercices remplacés") + (bil.restants ? " · " + bil.restants + " à revoir à la main" : " ✅"));
+        break;
       case "importer": $("#fichier-import").click(); break;
       case "rappel-plus-tard":
         var inf = lire(K_SAUVEGARDE, {}); inf.reporteJusquau = iso(ajouterJours(new Date(), 2));
